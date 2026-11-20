@@ -14,62 +14,68 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create .env file from secrets
-        shell: bash
+        shell: pwsh
         run: |
-          cat > .env << EOF
+          @"
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           DB_NAME=${{ secrets.DB_NAME }}
           APP_PORT=${{ secrets.APP_PORT }}
-          EOF
-          echo "Masked .env:"
-          sed 's/=.*/=***/' .env
+          "@ | Out-File -FilePath .env -Encoding utf8
+          Write-Host "Masked .env:"
+          (Get-Content .env) -replace '=.*', '=***'
 
       - name: Deploy with Docker Compose
-        shell: bash
+        shell: pwsh
         run: |
-          docker compose down -v || true
+          docker compose down -v
           docker compose up -d --build
-          sleep 15
+          Start-Sleep -Seconds 15
           docker compose ps
-          if docker compose ps | grep -q "Up"; then
-            echo "All containers are running"
-          else
+          $status = docker compose ps
+          if ($status -match "Up") {
+            Write-Host "All containers are running"
+          } else {
             docker compose logs
             exit 1
-          fi
+          }
 
       - name: Run application tests
-        shell: bash
+        shell: pwsh
         run: |
-          curl -f http://localhost:${{ secrets.APP_PORT }}/ > /dev/null
-          API_RESPONSE=$(curl -sf http://localhost:${{ secrets.APP_PORT }}/api/items)
-          echo "API Response: $API_RESPONSE"
+          $port = "${{ secrets.APP_PORT }}"
+          $html = Invoke-RestMethod -Uri "http://localhost:$port/"
+          $apiResponse = Invoke-RestMethod -Uri "http://localhost:$port/api/items"
+          Write-Host "API Response: $($apiResponse | ConvertTo-Json -Compress)"
 
-          DB_COUNT=$(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' \r\n')
-          API_COUNT=$(echo "$API_RESPONSE" | grep -o '"id":' | wc -l | tr -d ' ')
+          $dbCount = (docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;").Trim()
+          $apiCount = $apiResponse.Count
 
-          echo "DB count: $DB_COUNT | API count: $API_COUNT"
-          if [ "$DB_COUNT" != "$API_COUNT" ] || [ "$DB_COUNT" -eq 0 ]; then
-            echo "Data consistency test failed"
+          Write-Host "DB count: $dbCount | API count: $apiCount"
+          if ([int]$dbCount -ne [int]$apiCount -or [int]$dbCount -eq 0) {
+            Write-Host "Data consistency test failed"
             exit 1
-          fi
+          }
 
-          curl -s http://localhost:${{ secrets.APP_PORT }}/ | grep -q "Items from DB"
+          if ($html -notmatch "Items from DB") {
+            Write-Host "Frontend check failed"
+            exit 1
+          }
 
       - name: Create report and logs
         if: always()
-        shell: bash
+        shell: pwsh
         run: |
-          docker compose logs > deployment-logs.txt
-          docker ps -a > docker-ps.txt
-          docker images > docker-images.txt
-          cat > test-report.md << EOF
+          docker compose logs | Out-File -FilePath deployment-logs.txt -Encoding utf8
+          docker ps -a | Out-File -FilePath docker-ps.txt -Encoding utf8
+          docker images | Out-File -FilePath docker-images.txt -Encoding utf8
+          $dbCount = (docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;").Trim()
+          @"
           # Deployment Test Report
-          - Date: $(date)
+          - Date: $(Get-Date)
           - Status: Passed
-          - DB Records: $(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' \r\n')
-          EOF
+          - DB Records: $dbCount
+          "@ | Out-File -FilePath test-report.md -Encoding utf8
 
       - name: Upload artifacts
         if: always()
