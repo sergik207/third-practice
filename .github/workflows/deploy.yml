@@ -16,27 +16,30 @@ jobs:
       - name: Create .env file from secrets
         shell: powershell
         run: |
-          @"
+          $envContent = @"
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           DB_NAME=${{ secrets.DB_NAME }}
           APP_PORT=${{ secrets.APP_PORT }}
-          "@ | Out-File -FilePath .env -Encoding utf8
+          "@
+          [System.IO.File]::WriteAllText("$PWD\.env", $envContent, [System.Text.UTF8Encoding]::new($false))
           Write-Host "Masked .env:"
           (Get-Content .env) -replace '=.*', '=***'
 
       - name: Deploy with Docker Compose
         shell: powershell
         run: |
-          docker compose down -v
-          docker compose up -d --build
+          $ErrorActionPreference = "Continue"
+          docker compose down -v 2>&1 | Out-Null
+          docker rm -f app app-db 2>&1 | Out-Null
+          docker compose up -d --build 2>&1
           Start-Sleep -Seconds 15
-          docker compose ps
           $status = docker compose ps
+          $status
           if ($status -match "Up") {
             Write-Host "All containers are running"
           } else {
-            docker compose logs
+            docker compose logs 2>&1
             exit 1
           }
 
@@ -44,32 +47,36 @@ jobs:
         shell: powershell
         run: |
           $port = "${{ secrets.APP_PORT }}"
-          $html = Invoke-RestMethod -Uri "http://localhost:$port/"
+          $html = Invoke-WebRequest -Uri "http://localhost:$port/" -UseBasicParsing
           $apiResponse = Invoke-RestMethod -Uri "http://localhost:$port/api/items"
           Write-Host "API Response: $($apiResponse | ConvertTo-Json -Compress)"
 
-          $dbCount = (docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;").Trim()
-          $apiCount = $apiResponse.Count
+          $rawDb = docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;"
+          $dbCount = [int](($rawDb -join "").Trim())
+          $apiCount = [int](@($apiResponse).Count)
 
           Write-Host "DB count: $dbCount | API count: $apiCount"
-          if ([int]$dbCount -ne [int]$apiCount -or [int]$dbCount -eq 0) {
+          if ($dbCount -ne $apiCount -or $dbCount -eq 0) {
             Write-Host "Data consistency test failed"
             exit 1
           }
 
-          if ($html -notmatch "Items from DB") {
+          if ($html.Content -notmatch "Items from DB") {
             Write-Host "Frontend check failed"
             exit 1
           }
+          Write-Host "All tests passed successfully!"
 
       - name: Create report and logs
         if: always()
         shell: powershell
         run: |
-          docker compose logs | Out-File -FilePath deployment-logs.txt -Encoding utf8
-          docker ps -a | Out-File -FilePath docker-ps.txt -Encoding utf8
-          docker images | Out-File -FilePath docker-images.txt -Encoding utf8
-          $dbCount = (docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;").Trim()
+          $ErrorActionPreference = "Continue"
+          docker compose logs 2>&1 | Out-File -FilePath deployment-logs.txt -Encoding utf8
+          docker ps -a 2>&1 | Out-File -FilePath docker-ps.txt -Encoding utf8
+          docker images 2>&1 | Out-File -FilePath docker-images.txt -Encoding utf8
+          $rawDb = docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" 2>&1
+          $dbCount = ($rawDb -join "").Trim()
           @"
           # Deployment Test Report
           - Date: $(Get-Date)
